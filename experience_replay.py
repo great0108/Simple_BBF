@@ -72,10 +72,9 @@ def preprocess_replay(x):
 
 
 class PrioritizedReplay_nSteps_Sqrt(object):
-    def __init__(self, capacity, final_beta=1.0, initial_beta=0.4, total_steps=40000, prefetch_cap=8, alpha=0.5, beta=0.5):
+    def __init__(self, capacity, alpha=0.5, beta=0.5):
         self.capacity = capacity
         self.memory = deque([],maxlen=capacity)
-        self.total_steps=total_steps
 
         self.alpha=alpha
         self.beta=beta

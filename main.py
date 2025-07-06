@@ -42,8 +42,8 @@ parser.add_argument('--num_buckets', default=51, type=int, help='number of bucke
 parser.add_argument('--reset_freq', default=40000, type=int, help='model reset frequency in grad step')
 parser.add_argument('--replay_ratio', default=2, type=int, help='number of train steps in one step')
 
-parser.add_argument('--load_path', default="./checkpoints/atari_last.pth", type=str, help='load path for model')
-parser.add_argument('--train', default=False, help='True: train model, False: eval model')
+parser.add_argument('--load_path', default=None, type=str, help='load path for model')
+parser.add_argument('--train', default=True, help='True: train model, False: eval model')
 parser.add_argument('--eval_runs', default=50, help='episode numbers for evaluate model')
 
 args = parser.parse_args()
@@ -296,6 +296,8 @@ if __name__ == "__main__":
                 if ((step+1)%10000)==0:
                     save_checkpoint(model, model_target, optimizer, step,
                                     'checkpoints/atari_last.pth')
+
+                
                 
                     
                 
