@@ -1,21 +1,16 @@
-import gymnasium as gym
-import argparse
-import matplotlib.pyplot as plt
-from collections import namedtuple, deque
+from collections import deque
 from itertools import chain
 import tqdm
-import os
 import copy
 from multiprocessing import freeze_support
 
 import numpy as np
-import pandas as pd
 
 import torch
 import torch.nn.functional as F
+import torchvision.transforms as transforms
 
 from experience_replay import *
-from model import *
 from utils import *
 
 import locale
@@ -43,7 +38,13 @@ class BBF:
         self.schedule_max_step = reset_freq//4
         self.replay_ratio = replay_ratio
         self.weight_decay = weight_decay
+        self.transforms = transforms.Compose([transforms.Resize((96,72))])
 
+    def learn(self, total_timesteps, save_freq=None, save_path=None, name_prefix="bbf", project_name="BBF-Test", exp_name="BBF"):
+        wandb.init(
+            project=project_name,
+            name=exp_name,
+        )
 
         perception_modules=[self.model.encoder_cnn, self.model.transition]
         actor_modules=[self.model.prediction, self.model.projection, self.model.a, self.model.v]
@@ -63,12 +64,6 @@ class BBF:
         self.optimizer = torch.optim.AdamW(chain(params_wm, params_ac),
                                     lr=self.learning_rate, weight_decay=self.weight_decay, eps=1.5e-4)
 
-    def learn(self, total_timesteps, save_freq, save_path):
-        wandb.init(
-            project="BBF-Test",
-            name=f"BBF",
-        )
-
         self.memory = PrioritizedReplay_nSteps_Sqrt(total_timesteps+5)
         self.memory.free()
 
@@ -80,7 +75,7 @@ class BBF:
 
         while step<(10):
             state, info = self.env.reset()
-            state = preprocess(state).unsqueeze(0)
+            state = self.model.preprocess(state).unsqueeze(0)
 
             states = deque(maxlen=4)
             for i in range(4):
@@ -116,7 +111,7 @@ class BBF:
                 # print('action', action, action.shape)
 
                 state, reward, terminated, truncated, info = self.env.step(action.numpy())
-                state = preprocess(state).unsqueeze(0)
+                state = self.model.preprocess(state).unsqueeze(0)
                 states.append(state)
                 reward = np.array([reward])
                 terminated = np.array([terminated])
@@ -141,15 +136,15 @@ class BBF:
 
                 if len_memory>2000:
                     for i in range(self.replay_ratio):
-                        self.optimize(step, grad_step, n)
+                        self.optimize(grad_step, n)
                         target_model_ema(self.model, self.model_target)
                         grad_step+=1
 
-                if ((step+1)%save_freq)==0:
-                    save_checkpoint(self.model, self.model_target, optimizer, step, save_path)
+                if save_freq != None and ((step+1)%save_freq)==0:
+                    save_checkpoint(self.model, self.model_target, f"{save_path}/{name_prefix}_{step+1}_steps.pth")
                     
                 
-                if grad_step>self.reset_every:
+                if grad_step>self.reset_freq:
                     #eval()
                     print('Reseting on step', step, grad_step)
                     
@@ -174,10 +169,10 @@ class BBF:
                             params_wm.append(param)
                     
                     optimizer_aux = torch.optim.AdamW(params_wm, lr=self.learning_rate, weight_decay=self.weight_decay, eps=1.5e-4)
-                    copy_states(optimizer, optimizer_aux)
-                    optimizer = torch.optim.AdamW(chain(params_wm, params_ac),
+                    copy_states(self.optimizer, optimizer_aux)
+                    self.optimizer = torch.optim.AdamW(chain(params_wm, params_ac),
                                         lr=self.learning_rate, weight_decay=self.weight_decay, eps=1.5e-4)
-                    copy_states(optimizer_aux, optimizer)
+                    copy_states(optimizer_aux, self.optimizer)
                 
                 step+=1
                 
@@ -190,13 +185,13 @@ class BBF:
 
                     eps_reward[log_t]=0
                     state, info = self.env.reset()
-                    state = preprocess(state).unsqueeze(0)
+                    state = self.model.preprocess(state).unsqueeze(0)
 
                     states = deque(maxlen=4)
                     for i in range(4):
                         states.append(state)
 
-            save_checkpoint(self.model, self.model_target, optimizer, step, save_path)
+            save_checkpoint(self.model, self.model_target, f"{save_path}/{name_prefix}.pth")
         
 
     def optimize(self, grad_step, n):
@@ -289,3 +284,10 @@ class BBF:
         wandb.log({'loss': loss, 'dqn_loss': dqn_loss, 'recon_loss': recon_loss.mean(), 'lr': lr, 'returns': plot_vs.mean(),
                 'buffer rewards': rewards.mean(0).sum(), 'is_w': is_w.mean(),
                 'gamma': gamma_step, 'td_error': td_error, 'param_norm': param_norm.sum(), 'grad_norm': grad_norm.sum()})
+
+    def save(self, save_path):
+        save_checkpoint(self.model, self.model_target, save_path)
+
+    def load(self, load_path):
+        self.model.load_state_dict(torch.load(load_path)['model_state_dict'])
+        self.model_target.load_state_dict(torch.load(load_path)['model_target_state_dict'])

@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import renormalize
+import torchvision.transforms as transforms
+import numpy as np
 
 
 class MLP(nn.Module):
@@ -27,18 +28,18 @@ class MLP(nn.Module):
 
 
 class DQN_Conv(nn.Module):
-    def __init__(self, in_hiddens, hiddens, ks, stride, padding=0, max_pool=False, norm=True, act=nn.ReLU(), bias=True, layers=1):
+    def __init__(self, in_hiddens, hiddens, ks, stride, padding=0, max_pool=False,
+                 norm=True, act=nn.ReLU(), bias=True, layers=1):
         super().__init__()
 
         modules = []
         _hiddens = in_hiddens
         for l in range(layers):
             modules.append(nn.Conv2d(_hiddens, hiddens, ks, stride, padding, bias=bias))
-            if l == layers-1:
-                modules.append(nn.MaxPool2d(3,2,padding=1) if max_pool else nn.Identity(),)
-
             modules.append(nn.BatchNorm2d(hiddens, eps=1e-6) if norm else nn.Identity())
             modules.append(act)
+            if l == layers-1:
+                modules.append(nn.MaxPool2d(3,2,padding=1) if max_pool else nn.Identity())
             _hiddens = hiddens
 
         self.conv = nn.Sequential(*modules)
@@ -47,17 +48,19 @@ class DQN_Conv(nn.Module):
         return self.conv(X)
 
 
-class DQN(nn.Module):
+class BBF_Model(nn.Module):
     def __init__(self, n_actions, hiddens=2048, scale_width=4,
-                 num_buckets=51, Vmin=-10, Vmax=10):
+                 num_buckets=51, Vmin=-10, Vmax=10, resize=(96, 72)):
         super().__init__()
         self.support = torch.linspace(Vmin, Vmax, num_buckets).cuda()
         
         self.n_actions = n_actions
-        self.hiddens = hiddens
-        self.scale_width = scale_width
+        self.hiddens=hiddens
+        self.scale_width=scale_width
         self.num_buckets = num_buckets
+
         self.act = nn.ReLU()
+        self.transforms = transforms.Compose([transforms.Resize(resize)])
         
         # self.encoder_cnn = IMPALA_Resnet(scale_width=scale_width, norm=False, init=init_xavier, act=self.act)
         self.encoder_cnn = nn.Sequential(
@@ -80,7 +83,6 @@ class DQN(nn.Module):
         self.a = MLP(hiddens, out_hiddens=n_actions*num_buckets, layers=1)
         self.v = MLP(hiddens, out_hiddens=num_buckets, layers=1)
 
-    
     def forward(self, X, y_action):
         X, z = self.encode(X)
         
@@ -88,22 +90,35 @@ class DQN(nn.Module):
         z_pred = self.get_transition(z, y_action)
 
         return q, action, X[:,1:].clone().detach(), z_pred
-    
 
+    def renormalize(self, tensor):
+        shape = tensor.shape
+        tensor = tensor.view(tensor.shape[0], -1)
+        max_value,_ = torch.max(tensor, -1, keepdim=True)
+        min_value,_ = torch.min(tensor, -1, keepdim=True)
+        return ((tensor - min_value) / (max_value - min_value + 1e-5)).view(shape)
+
+    def preprocess(self, state):
+        state=torch.tensor(state, dtype=torch.float, device='cuda') / 255
+        state=self.transforms(state.permute(2,0,1))
+        return state
+    
     def env_step(self, X):
         with torch.no_grad():
             X, _ = self.encode(X)
             _, action = self.q_head(X)
             
             return action.detach()
-    
+
+    def predict(self, X):
+        return self.env_step(X)[0][0]
 
     def encode(self, X):
         batch, seq = X.shape[:2]
         self.batch = batch
         self.seq = seq
         X = self.encoder_cnn(X.contiguous().view(self.batch*self.seq, *(X.shape[2:]))).contiguous()
-        X = renormalize(X).contiguous().view(self.batch, self.seq, *X.shape[-3:])
+        X = self.renormalize(X).contiguous().view(self.batch, self.seq, *X.shape[-3:])
         X = X.contiguous().view(self.batch, self.seq, *X.shape[-3:])
         z = X.clone()
         X = X.flatten(-3,-1)
@@ -118,7 +133,7 @@ class DQN(nn.Module):
 
         z_pred = torch.cat( (z, action[:,0]), 1)
         z_pred = self.transition(z_pred)
-        z_pred = renormalize(z_pred)
+        z_pred = self.renormalize(z_pred)
         
         z_preds=[z_pred.clone()]
         
@@ -126,7 +141,7 @@ class DQN(nn.Module):
         for k in range(4):
             z_pred = torch.cat( (z_pred, action[:,k+1]), 1)
             z_pred = self.transition(z_pred)
-            z_pred = renormalize(z_pred)
+            z_pred = self.renormalize(z_pred)
             
             z_preds.append(z_pred)
         
@@ -138,7 +153,6 @@ class DQN(nn.Module):
         
         return z_pred
 
-    
     def q_head(self, X):
         q = self.dueling_dqn(X)
         action = (q*self.support).sum(-1).argmax(-1)
@@ -179,11 +193,12 @@ class DQN(nn.Module):
         for param, param_target in zip(rand_network.parameters(), target_network.parameters()):
             param_target.data = alpha * param_target.data + (1 - alpha) * param.data.clone()
 
-    def hard_reset(self, random_model, alpha=0.5):
+    def hard_reset(self, random_model=None, alpha=0.5):
         if random_model == None:
-            random_model = DQN(self.n_actions, self.hiddens, self.scale_width, self.num_buckets).cuda()
+            random_model = BBF_Model(self.n_actions, self.hiddens, self.scale_width, self.num_buckets).cuda()
 
         with torch.no_grad():
+            
             self.network_ema(random_model.encoder_cnn, self.encoder_cnn, alpha)
             self.network_ema(random_model.transition, self.transition, alpha)
 
@@ -192,3 +207,6 @@ class DQN(nn.Module):
 
             self.network_ema(random_model.a, self.a, 0)
             self.network_ema(random_model.v, self.v, 0)
+
+    def load(self, load_path):
+        self.load_state_dict(torch.load(load_path)['model_state_dict'])

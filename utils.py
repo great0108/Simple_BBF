@@ -2,26 +2,12 @@ import torch
 import copy
 import random
 import numpy as np
-import torchvision.transforms as transforms
 
-train_tfms = transforms.Compose([
-                        transforms.Resize((96,72)),
-                        ])
-
-def save_checkpoint(net, model_target, optimizer, step, path):
+def save_checkpoint(net, model_target, path):
     torch.save({
         'model_state_dict': net.state_dict(),
         'model_target_state_dict': model_target.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'step': step,
         }, path)
-
-def renormalize(tensor, has_batch=False):
-    shape = tensor.shape
-    tensor = tensor.view(tensor.shape[0], -1)
-    max_value,_ = torch.max(tensor, -1, keepdim=True)
-    min_value,_ = torch.min(tensor, -1, keepdim=True)
-    return ((tensor - min_value) / (max_value - min_value + 1e-5)).view(shape)
 
 def copy_states(source, target):
     for key, _ in zip(source.state_dict()['state'].keys(), target.state_dict()['state'].keys()):
@@ -34,11 +20,6 @@ def target_model_ema(model, model_target, ema=0.995):
     with torch.no_grad():
         for param, param_target in zip(model.parameters(), model_target.parameters()):
             param_target.data = ema * param_target.data + (1.0 - ema) * param.data.clone()
-
-def preprocess(state):
-    state=torch.tensor(state, dtype=torch.float, device='cuda') / 255
-    state=train_tfms(state.permute(2,0,1))
-    return state
 
 # https://github.com/google/dopamine/blob/master/dopamine/jax/agents/dqn/dqn_agent.py
 def linearly_decaying_epsilon(decay_period, step, warmup_steps, epsilon):
